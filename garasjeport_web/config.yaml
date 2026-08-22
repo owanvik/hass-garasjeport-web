@@ -1,0 +1,21 @@
+name: Garasjeport Web
+version: "1.0.0"
+slug: garasjeport_web
+description: Nettside med knapp som åpner garasjeporten. Brukernavn-only "auth".
+url: https://github.com/owanvik/hass-garasjeport-web
+arch:
+  - amd64
+init: false
+homeassistant_api: true
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: Webgrensesnitt (port-forward denne for tilgang utenfra)
+options:
+  username: BYTT-MEG-til-noe-langt
+  entity_id: button.garasjeport_garasjeport_apne
+  cooldown_seconds: 5
+schema:
+  username: str
+  entity_id: str
+  cooldown_seconds: int(0,300)
