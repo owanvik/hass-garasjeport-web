@@ -1,5 +1,5 @@
 name: Garasjeport Web
-version: "2.1.0"
+version: "2.2.0"
 slug: garasjeport_web
 description: Nettside med knapp som åpner garasjeporten. Brukerliste og adgangslogg.
 url: https://github.com/owanvik/hass-garasjeport-web
@@ -7,6 +7,9 @@ arch:
   - amd64
 init: false
 homeassistant_api: true
+# Trengs for at add-onet skal kunne lese og skrive sine egne opsjoner,
+# slik at blokkerte IP-er vises og kan fjernes i Configuration.
+hassio_api: true
 ports:
   8099/tcp: 8099
 ports_description:
@@ -25,6 +28,7 @@ options:
   block_hours: 0
   trust_proxy: false
   never_block: []
+  blocked_ips: []
 schema:
   users:
     - username: str
@@ -39,4 +43,6 @@ schema:
   block_hours: int(0,8760)
   trust_proxy: bool
   never_block:
+    - str
+  blocked_ips:
     - str

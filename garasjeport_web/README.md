@@ -84,6 +84,24 @@ ekte offentlige adresser hvis du skal teste sperren.
 
 En blokkert IP får 403 på alt unntatt `/health`, også med riktig brukernavn.
 
+### Blokkeringer i Configuration
+
+Blokkerte IP-er ligger i add-on-opsjonen `blocked_ips`, så de vises og kan
+redigeres direkte i HA sitt Configuration-skjema. Fjerner du en IP der, er den
+fri innen ~20 sekunder – add-onet spør Supervisor med jevne mellomrom.
+Legger du til en IP manuelt, blokkeres den på samme måte.
+
+Dette krever `hassio_api: true`, siden add-onet må lese og skrive sine egne
+opsjoner. To ting er verdt å vite:
+
+- `/data/options.json` skrives **bare ved oppstart**, så den kan ikke brukes
+  til å oppdage endringer. Derfor spør add-onet Supervisor-API-et i stedet.
+- Redigerer du andre opsjoner i UI-et samtidig som en ny blokkering skrives,
+  kan den ene overskrive den andre. Sjelden, men mulig.
+
+Feiltellerne ligger fortsatt i `/data/blocks.json` – de hører ikke i et
+konfigurasjonsskjema.
+
 ### Oppheve blokkeringer
 
 Brukere med `admin: true` får siden `/blokkeringer`: oversikt over IP-er med

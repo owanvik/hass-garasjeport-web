@@ -23,6 +23,10 @@ import urllib.request
 OPTIONS_FILE = os.environ.get("GP_OPTIONS", "/data/options.json")
 LOG_FILE = os.environ.get("GP_LOG", "/data/access.log")
 BLOCKS_FILE = os.environ.get("GP_BLOCKS", "/data/blocks.json")
+SELF_API = os.environ.get("GP_SELF_API", "http://supervisor/addons/self")
+# Hvor ofte vi spor Supervisor om opsjonene, for a fange opp at noen har
+# fjernet en blokkering i HA sitt Configuration-skjema.
+SYNC_SEKUNDER = int(os.environ.get("GP_SYNC", "20"))
 HA_URL = os.environ.get("GP_HA_URL", "http://supervisor/core/api")
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 COOKIE = "gp_user"
@@ -76,10 +80,43 @@ def load_options():
                            or opts.get("block_hours", 0)),
         "trust_proxy": bool(opts.get("trust_proxy", False)),
         "never_block": list(opts.get("never_block") or []),
+        "blocked_ips": list(opts.get("blocked_ips") or []),
     }
 
 
 CFG = load_options()
+
+
+def _self_get():
+    """Hent add-onets naavaerende opsjoner fra Supervisor.
+
+    /data/options.json skrives BARE ved oppstart, sa den kan ikke brukes til
+    a oppdage endringer gjort i HA-UI-et mens vi kjorer. Derfor API-et.
+    """
+    req = urllib.request.Request(
+        SELF_API + "/info",
+        headers={"Authorization": "Bearer " + SUPERVISOR_TOKEN},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read()).get("data", {}).get("options", {}) or {}
+
+
+def _self_set_blocked(ips):
+    """Skriv blokkerte IP-er tilbake til egne opsjoner.
+
+    Leser hele opsjonsobjektet forst og skriver det tilbake i sin helhet, sa
+    vi ikke nullstiller felter noen andre har endret i mellomtiden.
+    """
+    opts = _self_get()
+    opts["blocked_ips"] = sorted(set(ips))
+    body = json.dumps({"options": opts}).encode()
+    req = urllib.request.Request(
+        SELF_API + "/options", data=body, method="POST",
+        headers={"Authorization": "Bearer " + SUPERVISOR_TOKEN,
+                 "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return 200 <= r.status < 300
 
 
 def _load_blocks():
@@ -99,6 +136,51 @@ def _save_blocks(d):
 
 
 BLOCKS = _load_blocks()
+# Sannheten for HVILKE IP-er som er blokkert ligger i add-on-opsjonen
+# blocked_ips, sa den vises og kan fjernes i HA sitt Configuration-skjema.
+# Tellerne (feilforsok) blir liggende i BLOCKS - de har ingenting a gjore i
+# et konfigurasjonsskjema.
+BLOKKERT = set(str(x).strip() for x in (CFG.get("blocked_ips") or []) if str(x).strip())
+_api_virker = True
+
+
+def _sync_blokkerte():
+    """Les blocked_ips fra Supervisor. Fanger opp manuelle fjerninger i UI-et."""
+    global BLOKKERT, _api_virker
+    try:
+        opts = _self_get()
+        ny = set(str(x).strip() for x in (opts.get("blocked_ips") or []) if str(x).strip())
+        if ny != BLOKKERT:
+            fjernet = BLOKKERT - ny
+            lagt_til = ny - BLOKKERT
+            BLOKKERT = ny
+            if fjernet:
+                logg("unblock", "config", "-", "fjernet i HA-config: %s"
+                     % ", ".join(sorted(fjernet)))
+            if lagt_til:
+                logg("blocked", "config", "-", "lagt til i HA-config: %s"
+                     % ", ".join(sorted(lagt_til)))
+        _api_virker = True
+    except Exception as e:
+        if _api_virker:
+            print("Kunne ikke lese opsjoner fra Supervisor (%s) - "
+                  "bruker lokal tilstand" % e, flush=True)
+        _api_virker = False
+
+
+def _skriv_blokkerte():
+    try:
+        _self_set_blocked(BLOKKERT)
+        return True
+    except Exception as e:
+        print("Kunne ikke skrive blocked_ips til opsjoner: %s" % e, flush=True)
+        return False
+
+
+def _sync_loop():
+    while True:
+        time.sleep(SYNC_SEKUNDER)
+        _sync_blokkerte()
 
 
 def fredet(ip):
@@ -120,17 +202,15 @@ def fredet(ip):
 
 
 def er_blokkert(ip):
-    with _lock:
-        b = BLOCKS.get(ip)
-        if not b or not b.get("blocked_at"):
+    if ip not in BLOKKERT:
+        return False
+    if CFG["block_hours"]:
+        with _lock:
+            nar = (BLOCKS.get(ip) or {}).get("blocked_at")
+        if nar and time.time() - nar > CFG["block_hours"] * 3600:
+            opphev(ip)
             return False
-        if CFG["block_hours"]:
-            if time.time() - b["blocked_at"] > CFG["block_hours"] * 3600:
-                b["blocked_at"] = None
-                b["fails"] = []
-                _save_blocks(BLOCKS)
-                return False
-        return True
+    return True
 
 
 def registrer_feil(ip):
@@ -142,15 +222,21 @@ def registrer_feil(ip):
     with _lock:
         b = BLOCKS.setdefault(ip, {"fails": [], "blocked_at": None})
         b["fails"] = [t for t in b["fails"] if t > cutoff] + [now]
-        if b["blocked_at"]:
+        if ip in BLOKKERT:
             _save_blocks(BLOCKS)
             return False
-        if len(b["fails"]) >= CFG["max_failures"]:
+        alt_blokkert = ip in BLOKKERT
+        if not alt_blokkert and len(b["fails"]) >= CFG["max_failures"]:
             b["blocked_at"] = now
+            BLOKKERT.add(ip)
             _save_blocks(BLOCKS)
-            return True
-        _save_blocks(BLOCKS)
-        return False
+            ny = True
+        else:
+            _save_blocks(BLOCKS)
+            ny = False
+    if ny:
+        _skriv_blokkerte()   # utenfor laasen: nettverkskall
+    return ny
 
 
 def antall_feil(ip):
@@ -164,11 +250,15 @@ def opphev(ip=None):
     """Fjern blokkering for en IP, eller alle hvis ip er None."""
     with _lock:
         if ip is None:
-            n = sum(1 for v in BLOCKS.values() if v.get("blocked_at"))
+            n = len(BLOKKERT)
+            BLOKKERT.clear()
             BLOCKS.clear()
         else:
-            n = 1 if BLOCKS.pop(ip, None) else 0
+            n = 1 if ip in BLOKKERT else 0
+            BLOKKERT.discard(ip)
+            BLOCKS.pop(ip, None)
         _save_blocks(BLOCKS)
+    _skriv_blokkerte()
     return n
 
 
@@ -176,10 +266,11 @@ def blokkeringer():
     out = []
     cutoff = time.time() - CFG["window_hours"] * 3600
     with _lock:
-        for ip, b in BLOCKS.items():
+        for ip in set(BLOCKS) | BLOKKERT:
+            b = BLOCKS.get(ip) or {}
             ferske = len([t for t in b.get("fails", []) if t > cutoff])
             out.append({"ip": ip, "fails": ferske, "total": len(b.get("fails", [])),
-                        "blocked_at": b.get("blocked_at")})
+                        "blocked_at": b.get("blocked_at") if ip in BLOKKERT else None})
     out.sort(key=lambda x: (x["blocked_at"] or 0, x["fails"]), reverse=True)
     return out
 
@@ -656,6 +747,10 @@ if __name__ == "__main__":
         print("ADVARSEL: ingen brukere konfigurert - alle blir avvist", flush=True)
     else:
         print("Brukere: %s" % ", ".join(u["label"] for u in CFG["users"]), flush=True)
-    print("Lytter på :8099, entity=%s, cooldown=%ds, logg=%s"
-          % (CFG["entity_id"], CFG["cooldown"], LOG_FILE), flush=True)
+    print("Blokkerte IP-er ved oppstart: %s"
+          % (", ".join(sorted(BLOKKERT)) or "ingen"), flush=True)
+    _sync_blokkerte()
+    threading.Thread(target=_sync_loop, daemon=True).start()
+    print("Lytter på :8099, entity=%s, cooldown=%ds, logg=%s, sync=%ds"
+          % (CFG["entity_id"], CFG["cooldown"], LOG_FILE, SYNC_SEKUNDER), flush=True)
     Server(("0.0.0.0", 8099), H).serve_forever()
