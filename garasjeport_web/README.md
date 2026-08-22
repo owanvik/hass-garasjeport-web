@@ -117,6 +117,12 @@ Add-onet leverer manifest og ikoner, så siden kan legges til som app-ikon.
 Når den *ikke* er startet fra hjemskjermen, vises et avvisbart banner med
 instruksjon. `pwa_banner: false` skrur det av.
 
+Banneret er en **instruksjon, ikke en handling** – iOS tillater ikke at siden
+utløser «Legg til på Hjem-skjerm» selv. Derfor er ingen av knappene utformet
+som en primærhandling; de heter «Senere» (utsetter 30 dager) og «Ikke vis
+igjen». En teal handlingsknapp her leses som «gjør det for meg», og da virker
+banneret ødelagt når den bare lukker seg.
+
 **Viktig begrensning:** det finnes ingen måte å se om ikonet ligger på
 hjemskjermen. Man kan bare oppdage om siden er **startet derfra**
 (`navigator.standalone` / `display-mode: standalone`). Åpner noen i Safari

@@ -478,11 +478,17 @@ footer{margin-top:22px;font-size:12px;color:var(--dim)}
 #pwa b{font-size:15px}
 #pwa p{margin:6px 0 10px;color:var(--dim);font-size:13px;line-height:1.45}
 #pwa .rad{display:flex;gap:8px}
-#pwa button{flex:1;padding:9px;font-size:14px;font-weight:600;border:none;
-     border-radius:9px;cursor:pointer}
-#pwa .ja{background:var(--accent);color:#fff}
-#pwa .nei{background:transparent;color:var(--dim);border:1px solid var(--line)}
+#pwa button{flex:1;padding:9px;font-size:14px;font-weight:600;
+     border-radius:9px;cursor:pointer;background:transparent;
+     color:var(--fg);border:1px solid var(--line)}
+#pwa button:active{background:var(--bg)}
+#pwa .nei{color:var(--dim)}
 #pwa input{font-size:12px;padding:7px 9px;margin:0 0 10px}
+#pwa ol{margin:8px 0 12px;padding-left:20px;font-size:13px;color:var(--fg);
+     line-height:1.7}
+#pwa ol li{margin:0}
+#pwa .merk{color:var(--dim);font-size:12px;margin:0 0 4px}
+.delikon{vertical-align:-3px;margin:0 1px}
 kbd{background:var(--bg);border:1px solid var(--line);border-radius:4px;
     padding:1px 5px;font:inherit;font-size:12px}
 a{color:var(--dim)}
@@ -502,11 +508,11 @@ td.d{white-space:normal;color:var(--dim)}
 </style></head><body><div class="card __WIDE__">__BODY__</div>
 <div id="pwa">
   <b>Legg den på Hjem-skjerm</b>
-  <p id="pwatxt"></p>
+  <div id="pwatxt"></div>
   <div id="pwalenke"></div>
   <div class="rad">
-    <button class="nei" id="pwasenere">Ikke nå</button>
-    <button class="ja" id="pwaok">Lagt til</button>
+    <button class="nei" id="pwasenere">Senere</button>
+    <button id="pwaok">Ikke vis igjen</button>
   </div>
 </div>
 <script>
@@ -539,9 +545,21 @@ if(b){b.addEventListener('click',function(){
     if(v === 'alltid') return;
     if(v && Date.now() < parseInt(v,10)) return;
   } catch(e){}
+  // iOS kan IKKE utlose dette programmatisk (beforeinstallprompt finnes bare
+  // i Chrome/Android), sa banneret er en instruksjon - ikke en handling.
+  // Derfor ser ingen av knappene ut som en primaerhandling.
+  var del = '<svg class="delikon" viewBox="0 0 24 24" width="15" height="15" ' +
+    'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-label="Del"><path d="M12 3v11"/>' +
+    '<path d="M8 7l4-4 4 4"/><path d="M5 13v7h14v-7"/></svg>';
   document.getElementById('pwatxt').innerHTML = ios
-    ? 'Trykk <kbd>Del</kbd> nederst i Safari, og velg <kbd>Legg til p\u00e5 Hjem-skjerm</kbd>. Da f\u00e5r du et ikon som \u00e5pner porten direkte.'
-    : 'Bruk nettleserens meny og velg <kbd>Installer</kbd> eller <kbd>Legg til p\u00e5 startsiden</kbd>.';
+    ? '<p class="merk">Dette m\u00e5 gj\u00f8res i Safari \u2013 iOS tillater ikke at siden gj\u00f8r det selv.</p>'
+      + '<ol><li>Trykk ' + del + ' nederst i Safari</li>'
+      + '<li>Velg <kbd>Legg til p\u00e5 Hjem-skjerm</kbd></li>'
+      + '<li>Trykk <kbd>Legg til</kbd></li></ol>'
+    : '<p class="merk">Dette m\u00e5 gj\u00f8res i nettleserens meny.</p>'
+      + '<ol><li>\u00c5pne menyen</li>'
+      + '<li>Velg <kbd>Installer</kbd> eller <kbd>Legg til p\u00e5 startsiden</kbd></li></ol>';
   if(window.__MINLENKE__){
     var d = document.getElementById('pwalenke');
     d.innerHTML = '<p style="margin-bottom:4px">Legg til denne lenken, s\u00e5 slipper du \u00e5 logge inn i appen:</p>' +
