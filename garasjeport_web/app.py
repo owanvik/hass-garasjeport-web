@@ -270,8 +270,10 @@ def blokkeringer():
             b = BLOCKS.get(ip) or {}
             ferske = len([t for t in b.get("fails", []) if t > cutoff])
             out.append({"ip": ip, "fails": ferske, "total": len(b.get("fails", [])),
-                        "blocked_at": b.get("blocked_at") if ip in BLOKKERT else None})
-    out.sort(key=lambda x: (x["blocked_at"] or 0, x["fails"]), reverse=True)
+                        "blokkert": ip in BLOKKERT,
+                        "blocked_at": b.get("blocked_at")})
+    out.sort(key=lambda x: (x["blokkert"], x["blocked_at"] or 0, x["fails"]),
+             reverse=True)
     return out
 
 
@@ -501,7 +503,7 @@ def logg_html(rows, who):
 
 
 def blocks_html(rader, who):
-    aktive = [r for r in rader if r["blocked_at"]]
+    aktive = [r for r in rader if r["blokkert"]]
     b = ['<h1>Blokkeringer</h1><p class="sub">%d aktiv(e) &middot; grense: %d feil '
          'per %d timer &middot; innlogget som <strong>%s</strong></p>'
          % (len(aktive), CFG["max_failures"], CFG["window_hours"], esc(who))]
@@ -510,10 +512,10 @@ def blocks_html(rader, who):
     if not rader:
         b.append('<tr><td colspan="5" class="d">Ingen feilforsøk registrert</td></tr>')
     for r in rader:
-        if r["blocked_at"]:
+        if r["blokkert"]:
             status = "<span class='tag t-fail'>BLOKKERT</span>"
-            siden = time.strftime("%Y-%m-%d %H:%M",
-                                  time.localtime(r["blocked_at"]))
+            siden = (time.strftime("%Y-%m-%d %H:%M", time.localtime(r["blocked_at"]))
+                     if r["blocked_at"] else "manuelt")
             knapp = ("<form method='POST' action='unblock' style='margin:0'>"
                      "<input type='hidden' name='ip' value='%s'>"
                      "<button class='go' style='padding:5px 10px;font-size:13px;"
