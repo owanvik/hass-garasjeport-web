@@ -110,3 +110,25 @@ alle. Opphevinger logges med hvem som gjorde det.
 
 Har du ingen admin-bruker, kan blokkeringer også fjernes ved å slette
 `/data/blocks.json` i add-onet og restarte.
+
+## Hjem-skjerm (iOS/Android)
+
+Add-onet leverer manifest og ikoner, så siden kan legges til som app-ikon.
+Når den *ikke* er startet fra hjemskjermen, vises et avvisbart banner med
+instruksjon. `pwa_banner: false` skrur det av.
+
+**Viktig begrensning:** det finnes ingen måte å se om ikonet ligger på
+hjemskjermen. Man kan bare oppdage om siden er **startet derfra**
+(`navigator.standalone` / `display-mode: standalone`). Åpner noen i Safari
+selv om de har ikonet, ser det identisk ut med å ikke ha det. Derfor er
+banneret avvisbart: «Ikke nå» utsetter 30 dager, «Lagt til» skjuler for godt
+(lagret i `localStorage`).
+
+iOS kan heller ikke utløse «Legg til på Hjem-skjerm» programmatisk –
+`beforeinstallprompt` finnes bare i Chrome/Android. Banneret viser derfor
+bare instruksjonen.
+
+En iOS-app startet fra hjemskjermen har **egen cookie-jar**, så den som
+legger til ikonet må logge inn en gang til inne i appen. Banneret viser
+derfor en personlig lenke med `?u=<brukernavn>` som logger inn automatisk.
+Merk at den lenken inneholder hemmeligheten og lagres på enheten.

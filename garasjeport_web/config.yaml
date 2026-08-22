@@ -1,5 +1,5 @@
 name: Garasjeport Web
-version: "2.2.1"
+version: "2.3.0"
 slug: garasjeport_web
 description: Nettside med knapp som åpner garasjeporten. Brukerliste og adgangslogg.
 url: https://github.com/owanvik/hass-garasjeport-web
@@ -29,6 +29,7 @@ options:
   trust_proxy: false
   never_block: []
   blocked_ips: []
+  pwa_banner: true
 schema:
   users:
     - username: str
@@ -46,3 +47,4 @@ schema:
     - str
   blocked_ips:
     - str
+  pwa_banner: bool

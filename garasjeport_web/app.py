@@ -81,6 +81,7 @@ def load_options():
         "trust_proxy": bool(opts.get("trust_proxy", False)),
         "never_block": list(opts.get("never_block") or []),
         "blocked_ips": list(opts.get("blocked_ips") or []),
+        "pwa_banner": bool(opts.get("pwa_banner", True)),
     }
 
 
@@ -404,10 +405,33 @@ def press():
 
 
 # ----------------------------------------------------------------- html ----
+STATIC = {
+    "/icon-180.png": ("icon-180.png", "image/png"),
+    "/icon-192.png": ("icon-192.png", "image/png"),
+    "/icon-512.png": ("icon-512.png", "image/png"),
+}
+
+MANIFEST = json.dumps({
+    "name": "Garasjeport", "short_name": "Garasjeport",
+    "start_url": "./", "scope": "./", "display": "standalone",
+    "background_color": "#0f766e", "theme_color": "#0f766e",
+    "icons": [{"src": "icon-192.png", "sizes": "192x192", "type": "image/png"},
+              {"src": "icon-512.png", "sizes": "512x512", "type": "image/png",
+               "purpose": "any maskable"}],
+}, ensure_ascii=False)
+
 PAGE = """<!doctype html>
 <html lang="no"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><title>Garasjeport</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Garasjeport">
+<meta name="theme-color" content="#0f766e">
 <style>
 :root{--bg:#f4f4f5;--card:#fff;--fg:#18181b;--dim:#71717a;--line:#e4e4e7;
       --accent:#0f766e;--accent2:#115e59;--err:#b91c1c;--ok:#15803d}
@@ -439,6 +463,20 @@ button.go{width:100%;padding:12px;font-size:16px;font-weight:600;border:none;
 #msg{margin-top:20px;min-height:22px;font-size:14px;font-weight:500}
 .ok{color:var(--ok)}.err{color:var(--err)}
 footer{margin-top:22px;font-size:12px;color:var(--dim)}
+#pwa{display:none;position:fixed;left:12px;right:12px;bottom:12px;z-index:9;
+     background:var(--card);border:1px solid var(--line);border-radius:14px;
+     padding:14px 16px;box-shadow:0 6px 24px rgba(0,0,0,.18);text-align:left;
+     max-width:420px;margin:0 auto;font-size:14px}
+#pwa b{font-size:15px}
+#pwa p{margin:6px 0 10px;color:var(--dim);font-size:13px;line-height:1.45}
+#pwa .rad{display:flex;gap:8px}
+#pwa button{flex:1;padding:9px;font-size:14px;font-weight:600;border:none;
+     border-radius:9px;cursor:pointer}
+#pwa .ja{background:var(--accent);color:#fff}
+#pwa .nei{background:transparent;color:var(--dim);border:1px solid var(--line)}
+#pwa input{font-size:12px;padding:7px 9px;margin:0 0 10px}
+kbd{background:var(--bg);border:1px solid var(--line);border-radius:4px;
+    padding:1px 5px;font:inherit;font-size:12px}
 a{color:var(--dim)}
 table{width:100%;border-collapse:collapse;font-size:13px;
       font-variant-numeric:tabular-nums}
@@ -454,6 +492,15 @@ td.d{white-space:normal;color:var(--dim)}
 .t-fail{background:rgba(185,28,28,.14);color:var(--err)}
 .t-in{background:rgba(113,113,122,.16);color:var(--dim)}
 </style></head><body><div class="card __WIDE__">__BODY__</div>
+<div id="pwa">
+  <b>Legg den på Hjem-skjerm</b>
+  <p id="pwatxt"></p>
+  <div id="pwalenke"></div>
+  <div class="rad">
+    <button class="nei" id="pwasenere">Ikke nå</button>
+    <button class="ja" id="pwaok">Lagt til</button>
+  </div>
+</div>
 <script>
 var b=document.getElementById('open');
 if(b){b.addEventListener('click',function(){
@@ -464,6 +511,51 @@ if(b){b.addEventListener('click',function(){
   .catch(function(){m.className='err';m.textContent='\\u2717 Nettverksfeil'})
   .then(function(){setTimeout(function(){b.disabled=false},2000)})
 })}
+
+// --- Hjem-skjerm-banner -------------------------------------------------
+// Vi kan IKKE se om ikonet ligger pa hjemskjermen - bare om siden er
+// STARTET derfra. Apner noen i Safari selv om de har ikonet, ser det
+// identisk ut. Derfor er banneret avvisbart og husker valget.
+(function(){
+  var el = document.getElementById('pwa');
+  if(!el || !window.__PWA__) return;
+  var standalone = (window.navigator.standalone === true) ||
+      (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  if(standalone) return;
+  var ua = navigator.userAgent;
+  var ios = /iP(hone|od|ad)/.test(ua) ||
+      (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);  // iPadOS later som Mac
+  var K = 'pwa_skjul';
+  try {
+    var v = localStorage.getItem(K);
+    if(v === 'alltid') return;
+    if(v && Date.now() < parseInt(v,10)) return;
+  } catch(e){}
+  document.getElementById('pwatxt').innerHTML = ios
+    ? 'Trykk <kbd>Del</kbd> nederst i Safari, og velg <kbd>Legg til p\u00e5 Hjem-skjerm</kbd>. Da f\u00e5r du et ikon som \u00e5pner porten direkte.'
+    : 'Bruk nettleserens meny og velg <kbd>Installer</kbd> eller <kbd>Legg til p\u00e5 startsiden</kbd>.';
+  if(window.__MINLENKE__){
+    var d = document.getElementById('pwalenke');
+    d.innerHTML = '<p style="margin-bottom:4px">Legg til denne lenken, s\u00e5 slipper du \u00e5 logge inn i appen:</p>' +
+      '<input readonly value="' + window.__MINLENKE__ + '">';
+    var inp = d.querySelector('input');
+    inp.addEventListener('focus', function(){ this.select(); });
+    inp.addEventListener('click', function(){ this.select(); });
+  }
+  el.style.display = 'block';
+  // Banneret er fixed og dekket footer-lenkene - gi body plass under.
+  document.body.style.paddingBottom = (el.offsetHeight + 28) + 'px';
+  document.getElementById('pwasenere').onclick = function(){
+    try { localStorage.setItem(K, String(Date.now() + 30*86400000)); } catch(e){}
+    el.style.display = 'none';
+    document.body.style.paddingBottom = '';
+  };
+  document.getElementById('pwaok').onclick = function(){
+    try { localStorage.setItem(K, 'alltid'); } catch(e){}
+    el.style.display = 'none';
+    document.body.style.paddingBottom = '';
+  };
+})();
 </script></body></html>"""
 
 LOGIN = """<h1>Garasjeport</h1><p class="sub">Skriv inn brukernavn</p>
@@ -473,15 +565,15 @@ LOGIN = """<h1>Garasjeport</h1><p class="sub">Skriv inn brukernavn</p>
 <button class="go" type="submit">Fortsett</button></form>__ERR__"""
 
 BUTTON = """<h1>Garasjeport</h1>
-<p class="sub">1A &middot; innlogget som <strong>__WHO__</strong></p>
-<button class="big" id="open"><span class="icon">&#9650;</span>APNE</button>
+<p class="sub">innlogget som <strong>__WHO__</strong></p>
+<button class="big" id="open"><span class="icon">&#9650;</span>ÅPNE</button>
 <div id="msg"></div>
-<footer>Porten melder ikke tilbake &middot; lukker seg selv<br><a href="logg">logg</a>__ADMIN__
+<footer>Porten lukker seg selv<br><a href="logg">logg</a>__ADMIN__
  &middot; <a href="logout">logg ut</a></footer>"""
 
 
 def logg_html(rows, who):
-    tags = {"open_ok": ("t-open", "APNET"), "open_fail": ("t-fail", "FEIL"),
+    tags = {"open_ok": ("t-open", "ÅPNET"), "open_fail": ("t-fail", "FEIL"),
             "login_ok": ("t-in", "LOGG INN"), "login_fail": ("t-fail", "AVVIST"),
             "logout": ("t-in", "LOGG UT"), "blocked": ("t-fail", "BLOKKERT"),
             "blocked_try": ("t-fail", "STENGT UTE"),
@@ -577,7 +669,20 @@ class H(http.server.BaseHTTPRequestHandler):
 
     def _btn(self, u):
         adm = ' &middot; <a href="blokkeringer">blokkeringer</a>' if u["admin"] else ''
-        return BUTTON.replace("__WHO__", esc(u["label"])).replace("__ADMIN__", adm)
+        # Standalone-apper pa iOS har egen cookie-jar, sa den som legger til
+        # ikonet ma logge inn en gang til i appen. En lenke med ?u= gjor at
+        # appen logger inn selv ved hver oppstart.
+        vert = self.headers.get("Host", "")
+        skjema = "https" if getattr(self.connection, "context", None) else "http"
+        minlenke = ""
+        if CFG["pwa_banner"] and vert:
+            minlenke = "%s://%s/?u=%s" % (skjema, vert,
+                                          urllib.parse.quote(u["username"]))
+        flagg = ("<script>window.__PWA__=%s;window.__MINLENKE__=%s;</script>"
+                 % ("true" if CFG["pwa_banner"] else "false",
+                    json.dumps(minlenke) if minlenke else '""'))
+        return (BUTTON.replace("__WHO__", esc(u["label"]))
+                      .replace("__ADMIN__", adm) + flagg)
 
     def _user(self):
         for part in self.headers.get("Cookie", "").split(";"):
@@ -620,7 +725,7 @@ class H(http.server.BaseHTTPRequestHandler):
 
     def _stengt(self, route):
         """True hvis forespoerselen skal avvises fordi IP-en er blokkert."""
-        if route == "/health":
+        if route == "/health" or route == "/manifest.json" or route in STATIC:
             return False
         ip = self.client_ip()
         if not er_blokkert(ip):
@@ -637,6 +742,25 @@ class H(http.server.BaseHTTPRequestHandler):
         route = p.path.rstrip("/") or "/"
         if self._stengt(route):
             self._blokkert_side()
+            return
+        if route == "/manifest.json":
+            self._send(200, MANIFEST, "application/manifest+json")
+            return
+        if route in STATIC:
+            navn, ctype = STATIC[route]
+            try:
+                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       navn), "rb") as f:
+                    data = f.read()
+            except OSError:
+                self._send(404, b"", "text/plain")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(data)
             return
         if route == "/health":
             try:
