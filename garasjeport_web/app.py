@@ -31,13 +31,42 @@ def valid(name):
     return secrets.compare_digest(name.strip(), USERNAME.strip())
 
 
+def _get_state():
+    """Les entitetens state. Returnerer (finnes, state) - state kan vare None."""
+    req = urllib.request.Request(
+        HA_URL + "/states/" + urllib.parse.quote(ENTITY),
+        headers={"Authorization": "Bearer " + SUPERVISOR_TOKEN},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return True, json.loads(r.read()).get("state")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return False, None
+        raise
+
+
 def press():
-    """Kall HA-tjenesten. Returnerer (ok, melding)."""
+    """Kall HA-tjenesten. Returnerer (ok, melding).
+
+    HA svarer 2xx pa tjenestekall selv om entiteten ikke finnes, sa vi maa
+    sjekke at den eksisterer selv - ellers rapporterer vi suksess for en
+    skrivefeil. Etterpa leser vi state igjen: button-entiteter far et nytt
+    tidsstempel ved trykk, sa en endring bekrefter at det faktisk skjedde.
+    """
     global _last_open
     now = time.monotonic()
     if COOLDOWN and (now - _last_open) < COOLDOWN:
         venting = int(COOLDOWN - (now - _last_open)) + 1
         return False, "Vent %d s (sperre mot dobbelttrykk)" % venting
+
+    try:
+        finnes, before = _get_state()
+    except Exception as e:
+        return False, "Naadde ikke HA: %s" % e
+    if not finnes:
+        return False, "Entiteten '%s' finnes ikke i HA" % ENTITY
+
     body = json.dumps({"entity_id": ENTITY}).encode()
     req = urllib.request.Request(
         HA_URL + "/services/button/press",
@@ -50,14 +79,23 @@ def press():
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
-            if 200 <= r.status < 300:
-                _last_open = now
-                return True, "Signal sendt til porten"
-            return False, "HA svarte HTTP %d" % r.status
+            if not (200 <= r.status < 300):
+                return False, "HA svarte HTTP %d" % r.status
     except urllib.error.HTTPError as e:
-        return False, "HA-feil HTTP %d: %s" % (e.code, e.read()[:200].decode("utf-8", "replace"))
-    except Exception as e:  # nettverk, DNS, timeout
+        return False, "HA-feil HTTP %d: %s" % (
+            e.code, e.read()[:200].decode("utf-8", "replace"))
+    except Exception as e:
         return False, "Naadde ikke HA: %s" % e
+
+    _last_open = now
+    try:
+        _, after = _get_state()
+    except Exception:
+        after = None
+    if after and after != before:
+        return True, "Signal sendt - bekreftet av HA"
+    # Kallet gikk gjennom, men vi kunne ikke bekrefte at knappen ble trykket.
+    return True, "Signal sendt (ikke bekreftet av HA)"
 
 
 PAGE = """<!doctype html>

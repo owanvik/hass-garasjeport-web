@@ -1,5 +1,5 @@
 name: Garasjeport Web
-version: "1.0.1"
+version: "1.1.0"
 slug: garasjeport_web
 description: Nettside med knapp som åpner garasjeporten. Brukernavn-only "auth".
 url: https://github.com/owanvik/hass-garasjeport-web
