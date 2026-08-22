@@ -35,6 +35,13 @@ Hendelser: `login_ok`, `login_fail`, `open_ok`, `open_fail`, `logout`.
 Hver linje har tidspunkt, hendelse, hvilken bruker, klient-IP og en detalj.
 Avviste innlogginger logger hva som ble forsøkt, så du ser gjettingsforsøk.
 
+## Ingen tilbakemelding fra porten
+
+Hörmann HSE2-868 er en **enveis fast-kode-sender**. Motoren har ingen
+returkanal, så systemet kan aldri vite om porten faktisk åpnet seg.
+`open_ok` i loggen betyr «kommandoen ble sendt», ikke «porten gikk opp».
+Formuler aldri meldinger som antyder noe annet.
+
 ## Sikkerhet – les dette
 
 «Auth» er kun et brukernavn, uten passord. Bevisst valg, men det betyr:

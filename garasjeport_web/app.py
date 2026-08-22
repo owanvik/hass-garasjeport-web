@@ -144,7 +144,12 @@ def press():
 
     HA svarer 2xx pa button.press ogsa nar entity_id ikke finnes, sa vi maa
     sjekke eksistens selv. Etterpa leses state igjen: button-entiteter far
-    nytt tidsstempel ved trykk, sa en endring bekrefter at det skjedde.
+    nytt tidsstempel ved trykk.
+
+    NB: dette bekrefter kun at HA registrerte trykket - ikke at porten
+    apnet seg. HSE2-868 er en enveis fast-kode-sender uten returkanal, sa
+    portens faktiske tilstand er prinsipielt ukjent for oss. Ikke formuler
+    meldinger her som om vi vet noe om porten.
     """
     global _last_open
     now = time.monotonic()
@@ -182,8 +187,8 @@ def press():
     except Exception:
         after = None
     if after and after != before:
-        return True, "Signal sendt - bekreftet av HA"
-    return True, "Signal sendt (ikke bekreftet av HA)"
+        return True, "Kommando sendt (HA registrerte trykket)"
+    return True, "Kommando sendt (HA bekreftet ikke trykket)"
 
 
 # ----------------------------------------------------------------- html ----
@@ -259,7 +264,7 @@ BUTTON = """<h1>Garasjeport</h1>
 <p class="sub">1A &middot; innlogget som <strong>__WHO__</strong></p>
 <button class="big" id="open"><span class="icon">&#9650;</span>APNE</button>
 <div id="msg"></div>
-<footer>Porten lukker seg selv &middot; <a href="logg">logg</a>
+<footer>Porten melder ikke tilbake &middot; lukker seg selv<br><a href="logg">logg</a>
  &middot; <a href="logout">logg ut</a></footer>"""
 
 
