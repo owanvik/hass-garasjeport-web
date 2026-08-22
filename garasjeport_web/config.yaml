@@ -1,5 +1,5 @@
 name: Garasjeport Web
-version: "2.3.0"
+version: "2.4.0"
 slug: garasjeport_web
 description: Nettside med knapp som åpner garasjeporten. Brukerliste og adgangslogg.
 url: https://github.com/owanvik/hass-garasjeport-web
@@ -10,6 +10,9 @@ homeassistant_api: true
 # Trengs for at add-onet skal kunne lese og skrive sine egne opsjoner,
 # slik at blokkerte IP-er vises og kan fjernes i Configuration.
 hassio_api: true
+# Leser firmware fra /share/garasjeport-fw for fjernoppdatering av ESP-en
+map:
+  - share:ro
 ports:
   8099/tcp: 8099
 ports_description:
@@ -30,6 +33,7 @@ options:
   never_block: []
   blocked_ips: []
   pwa_banner: true
+  fw_token: ""
 schema:
   users:
     - username: str
@@ -48,3 +52,4 @@ schema:
   blocked_ips:
     - str
   pwa_banner: bool
+  fw_token: str?

@@ -11,6 +11,7 @@ med GP_-prefiks overstyrer, slik at appen kan kjores og testes utenfor HA.
 import http.server
 import ipaddress
 import json
+import re
 import os
 import secrets
 import socketserver
@@ -24,6 +25,8 @@ OPTIONS_FILE = os.environ.get("GP_OPTIONS", "/data/options.json")
 LOG_FILE = os.environ.get("GP_LOG", "/data/access.log")
 BLOCKS_FILE = os.environ.get("GP_BLOCKS", "/data/blocks.json")
 SELF_API = os.environ.get("GP_SELF_API", "http://supervisor/addons/self")
+FW_DIR = os.environ.get("GP_FW_DIR", "/share/garasjeport-fw")
+FW_OK = re.compile(r"^[A-Za-z0-9._-]{1,64}$")   # ingen stier, ingen traversering
 # Hvor ofte vi spor Supervisor om opsjonene, for a fange opp at noen har
 # fjernet en blokkering i HA sitt Configuration-skjema.
 SYNC_SEKUNDER = int(os.environ.get("GP_SYNC", "20"))
@@ -82,6 +85,7 @@ def load_options():
         "never_block": list(opts.get("never_block") or []),
         "blocked_ips": list(opts.get("blocked_ips") or []),
         "pwa_banner": bool(opts.get("pwa_banner", True)),
+        "fw_token": str(opts.get("fw_token") or "").strip(),
     }
 
 
@@ -577,7 +581,10 @@ def logg_html(rows, who):
             "login_ok": ("t-in", "LOGG INN"), "login_fail": ("t-fail", "AVVIST"),
             "logout": ("t-in", "LOGG UT"), "blocked": ("t-fail", "BLOKKERT"),
             "blocked_try": ("t-fail", "STENGT UTE"),
-            "unblock": ("t-open", "OPPHEVET")}
+            "unblock": ("t-open", "OPPHEVET"),
+            "fw_hentet": ("t-in", "FIRMWARE"),
+            "fw_avvist": ("t-fail", "FW AVVIST"),
+            "fw_mangler": ("t-fail", "FW MANGLER")}
     body = ['<h1>Adgangslogg</h1><p class="sub">Nyeste først &middot; innlogget som '
             '<strong>%s</strong></p><div class="wrap"><table>'
             '<tr><th>Tid</th><th>Hendelse</th><th>Bruker</th><th>IP</th>'
@@ -667,6 +674,42 @@ class H(http.server.BaseHTTPRequestHandler):
         html = PAGE.replace("__BODY__", inner).replace("__WIDE__", "wide" if wide else "")
         self._send(code, html, extra=extra)
 
+    def _firmware(self, route):
+        """Server firmware til ESP-en.
+
+        ESP-en kan ikke logge inn, sa autentiseringen er den lange
+        tilfeldige stien. Det er ogsa grunnen til at .bin-filen IKKE ma
+        ligge apent: en ESPHome-binaerfil inneholder WiFi- og
+        MQTT-passordene som lesbare strenger.
+        """
+        deler = route.split("/", 3)          # ['', 'fw', '<token>', 'fil']
+        if len(deler) < 4 or not secrets.compare_digest(deler[2], CFG["fw_token"]):
+            time.sleep(1)
+            logg("fw_avvist", None, self.client_ip(), "feil eller manglende token")
+            self._send(404, b"", "text/plain")
+            return
+        navn = deler[3]
+        if not FW_OK.match(navn):
+            self._send(404, b"", "text/plain")
+            return
+        sti = os.path.join(FW_DIR, navn)
+        try:
+            with open(sti, "rb") as f:
+                data = f.read()
+        except OSError:
+            logg("fw_mangler", None, self.client_ip(), navn)
+            self._send(404, b"", "text/plain")
+            return
+        ctype = ("application/json" if navn.endswith(".json")
+                 else "application/octet-stream")
+        logg("fw_hentet", "esp", self.client_ip(), "%s (%d B)" % (navn, len(data)))
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     def _btn(self, u):
         adm = ' &middot; <a href="blokkeringer">blokkeringer</a>' if u["admin"] else ''
         # Standalone-apper pa iOS har egen cookie-jar, sa den som legger til
@@ -727,6 +770,8 @@ class H(http.server.BaseHTTPRequestHandler):
         """True hvis forespoerselen skal avvises fordi IP-en er blokkert."""
         if route == "/health" or route == "/manifest.json" or route in STATIC:
             return False
+        if CFG["fw_token"] and route.startswith("/fw/"):
+            return False
         ip = self.client_ip()
         if not er_blokkert(ip):
             return False
@@ -742,6 +787,9 @@ class H(http.server.BaseHTTPRequestHandler):
         route = p.path.rstrip("/") or "/"
         if self._stengt(route):
             self._blokkert_side()
+            return
+        if CFG["fw_token"] and route.startswith("/fw/"):
+            self._firmware(route)
             return
         if route == "/manifest.json":
             self._send(200, MANIFEST, "application/manifest+json")

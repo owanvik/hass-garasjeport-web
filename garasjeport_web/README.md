@@ -132,3 +132,24 @@ En iOS-app startet fra hjemskjermen har **egen cookie-jar**, så den som
 legger til ikonet må logge inn en gang til inne i appen. Banneret viser
 derfor en personlig lenke med `?u=<brukernavn>` som logger inn automatisk.
 Merk at den lenken inneholder hemmeligheten og lagres på enheten.
+
+## Firmware-servering (fjernoppdatering av ESP-en)
+
+Står ESP-en på et fremmed nett (nabo-WiFi), er den uåtakelig utenfra, så den
+vanlige ESPHome-OTA-en på port 3232 fungerer ikke. Løsningen er pull-basert:
+enheten poller et manifest og henter firmware selv.
+
+Add-onet serverer `/fw/<fw_token>/manifest.json` og `.bin`-filer fra
+`/share/garasjeport-fw` (montert `share:ro`). Sett `fw_token` til en lang
+tilfeldig streng; tom verdi skrur rutene helt av.
+
+**Stien er autentiseringen, og det er med vilje:** ESP-en kan ikke logge inn.
+Derfor må token-en være lang og tilfeldig — for en **ESPHome-`.bin` inneholder
+WiFi-passordet, MQTT-passordet og OTA-passordet som lesbare strenger.** Legger
+du den filen på en åpen URL, publiserer du nettverkspassordene dine.
+
+Rutene er unntatt IP-sperren. Ellers kunne en blokkert NAT-adresse tatt fra deg
+fjernoppdateringen, og token-en er allerede autentiseringen.
+
+Hentinger logges (`FIRMWARE`), og fungerer samtidig som livstegn fra enheten.
+Avviste token og manglende filer logges også.
