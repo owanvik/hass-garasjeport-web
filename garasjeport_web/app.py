@@ -71,13 +71,17 @@ CFG = load_options()
 
 def whoami(given):
     """Finn brukeren som matcher. Konstant-tid, og sjekker alle for a unnga
-    at man kan lese ut treff pa responstiden."""
+    at man kan lese ut treff pa responstiden.
+
+    NB: compare_digest kaster TypeError pa str med ikke-ASCII tegn, sa vi
+    sammenligner bytes. Brukernavn med aeoa er helt vanlig her.
+    """
     if not given:
         return None
-    given = given.strip()
+    probe = given.strip().encode("utf-8")
     found = None
     for u in CFG["users"]:
-        if secrets.compare_digest(given, u["username"]):
+        if secrets.compare_digest(probe, u["username"].encode("utf-8")):
             found = found or u
     return found
 
@@ -352,7 +356,14 @@ class H(http.server.BaseHTTPRequestHandler):
         p = urllib.parse.urlparse(self.path)
         route = p.path.rstrip("/") or "/"
         if route == "/health":
-            self._send(200, json.dumps({"ok": True, "users": len(CFG["users"])}),
+            try:
+                whoami("helsesjekk-treffer-ingen")   # tren kodestien
+                auth_ok, feil = True, None
+            except Exception as e:
+                auth_ok, feil = False, "%s: %s" % (type(e).__name__, e)
+            self._send(200 if auth_ok else 500,
+                       json.dumps({"ok": auth_ok, "users": len(CFG["users"]),
+                                   "error": feil}),
                        "application/json")
             return
         if route == "/logout":
