@@ -1,7 +1,7 @@
 name: Garasjeport Web
-version: "1.1.0"
+version: "2.0.0"
 slug: garasjeport_web
-description: Nettside med knapp som åpner garasjeporten. Brukernavn-only "auth".
+description: Nettside med knapp som åpner garasjeporten. Brukerliste og adgangslogg.
 url: https://github.com/owanvik/hass-garasjeport-web
 arch:
   - amd64
@@ -12,10 +12,18 @@ ports:
 ports_description:
   8099/tcp: Webgrensesnitt (port-forward denne for tilgang utenfra)
 options:
-  username: BYTT-MEG-til-noe-langt
+  users:
+    - username: BYTT-MEG-til-noe-langt
+      label: Navn
+      enabled: true
   entity_id: button.garasjeport_garasjeport_apne
   cooldown_seconds: 5
+  log_max_lines: 5000
 schema:
-  username: str
+  users:
+    - username: str
+      label: str?
+      enabled: bool?
   entity_id: str
   cooldown_seconds: int(0,300)
+  log_max_lines: int(100,100000)

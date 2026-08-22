@@ -1,6 +1,4 @@
 #!/usr/bin/with-contenv bashio
-export GP_USERNAME="$(bashio::config 'username')"
-export GP_ENTITY="$(bashio::config 'entity_id')"
-export GP_COOLDOWN="$(bashio::config 'cooldown_seconds')"
-bashio::log.info "Garasjeport Web starter på port 8099 (entity: ${GP_ENTITY})"
+# app.py leser /data/options.json direkte - enklere enn a mate lister gjennom bashio.
+bashio::log.info "Garasjeport Web $(bashio::addon.version) starter på port 8099"
 exec python3 -u /app.py

@@ -1,40 +1,133 @@
 #!/usr/bin/env python3
-"""Garasjeport Web - minimal nettside med en knapp som trykker HA-knappen.
+"""Garasjeport Web - nettside med en knapp som apner garasjeporten.
 
-"Auth" er kun brukernavn (bevisst valg). Brukernavnet er i praksis et delt
-passord, sa lengden pa det er hele sikkerheten. Sammenligning er
-konstant-tid for a unnga at man kan gjette tegn for tegn via timing.
+"Auth" er kun brukernavn, uten passord. Brukernavnet er derfor i praksis et
+delt passord, og lengden pa det er hele sikkerheten. Hver bruker i lista
+identifiseres ved sitt brukernavn, og alt som skjer havner i adgangsloggen.
+
+Konfigurasjon leses fra /data/options.json (add-on-standard). Miljovariabler
+med GP_-prefiks overstyrer, slik at appen kan kjores og testes utenfor HA.
 """
 import http.server
 import json
 import os
 import secrets
 import socketserver
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-USERNAME = os.environ.get("GP_USERNAME", "")
-ENTITY = os.environ.get("GP_ENTITY", "button.garasjeport_garasjeport_apne")
-COOLDOWN = int(os.environ.get("GP_COOLDOWN", "5") or 0)
-SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
+OPTIONS_FILE = os.environ.get("GP_OPTIONS", "/data/options.json")
+LOG_FILE = os.environ.get("GP_LOG", "/data/access.log")
 HA_URL = os.environ.get("GP_HA_URL", "http://supervisor/core/api")
+SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 COOKIE = "gp_user"
 
+_lock = threading.Lock()
 _last_open = 0.0
 
 
-def valid(name):
-    if not USERNAME or not name:
-        return False
-    return secrets.compare_digest(name.strip(), USERNAME.strip())
+# --------------------------------------------------------------- config ----
+def load_options():
+    opts = {}
+    try:
+        with open(OPTIONS_FILE) as f:
+            opts = json.load(f)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print("Kunne ikke lese %s: %s" % (OPTIONS_FILE, e), flush=True)
+
+    users = []
+    if os.environ.get("GP_USERS"):  # testing: JSON-liste
+        users = json.loads(os.environ["GP_USERS"])
+    else:
+        users = opts.get("users") or []
+        # bakoverkompatibelt med v1.x som hadde en enkelt "username"
+        if not users and opts.get("username"):
+            users = [{"username": opts["username"], "label": "bruker"}]
+
+    clean = []
+    for u in users:
+        name = str(u.get("username", "")).strip()
+        if not name or not u.get("enabled", True):
+            continue
+        clean.append({"username": name,
+                      "label": str(u.get("label") or name).strip()})
+
+    return {
+        "users": clean,
+        "entity_id": os.environ.get("GP_ENTITY")
+                     or opts.get("entity_id", "button.garasjeport_garasjeport_apne"),
+        "cooldown": int(os.environ.get("GP_COOLDOWN") or opts.get("cooldown_seconds", 5)),
+        "log_max": int(os.environ.get("GP_LOG_MAX") or opts.get("log_max_lines", 5000)),
+    }
 
 
+CFG = load_options()
+
+
+def whoami(given):
+    """Finn brukeren som matcher. Konstant-tid, og sjekker alle for a unnga
+    at man kan lese ut treff pa responstiden."""
+    if not given:
+        return None
+    given = given.strip()
+    found = None
+    for u in CFG["users"]:
+        if secrets.compare_digest(given, u["username"]):
+            found = found or u
+    return found
+
+
+# ------------------------------------------------------------------ logg ----
+def logg(event, user, ip, detail=""):
+    """Skriv til add-on-loggen og til /data/access.log (JSONL, roteres)."""
+    rec = {
+        "t": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "event": event,
+        "user": user or "-",
+        "ip": ip,
+        "detail": detail,
+    }
+    print("[%s] %-11s user=%-14s ip=%-15s %s"
+          % (rec["t"], event, rec["user"], ip, detail), flush=True)
+    try:
+        with _lock:
+            with open(LOG_FILE, "a") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            # enkel rotasjon: behold de nyeste log_max linjene
+            with open(LOG_FILE) as f:
+                lines = f.readlines()
+            if len(lines) > CFG["log_max"]:
+                with open(LOG_FILE, "w") as f:
+                    f.writelines(lines[-CFG["log_max"]:])
+    except Exception as e:
+        print("Loggskriving feilet: %s" % e, flush=True)
+
+
+def les_logg(n=100):
+    try:
+        with open(LOG_FILE) as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return []
+    out = []
+    for ln in lines[-n:]:
+        try:
+            out.append(json.loads(ln))
+        except Exception:
+            continue
+    out.reverse()
+    return out
+
+
+# ---------------------------------------------------------------- trykk ----
 def _get_state():
-    """Les entitetens state. Returnerer (finnes, state) - state kan vare None."""
     req = urllib.request.Request(
-        HA_URL + "/states/" + urllib.parse.quote(ENTITY),
+        HA_URL + "/states/" + urllib.parse.quote(CFG["entity_id"]),
         headers={"Authorization": "Bearer " + SUPERVISOR_TOKEN},
     )
     try:
@@ -47,35 +140,31 @@ def _get_state():
 
 
 def press():
-    """Kall HA-tjenesten. Returnerer (ok, melding).
+    """Trykk knappen i HA. Returnerer (ok, melding).
 
-    HA svarer 2xx pa tjenestekall selv om entiteten ikke finnes, sa vi maa
-    sjekke at den eksisterer selv - ellers rapporterer vi suksess for en
-    skrivefeil. Etterpa leser vi state igjen: button-entiteter far et nytt
-    tidsstempel ved trykk, sa en endring bekrefter at det faktisk skjedde.
+    HA svarer 2xx pa button.press ogsa nar entity_id ikke finnes, sa vi maa
+    sjekke eksistens selv. Etterpa leses state igjen: button-entiteter far
+    nytt tidsstempel ved trykk, sa en endring bekrefter at det skjedde.
     """
     global _last_open
     now = time.monotonic()
-    if COOLDOWN and (now - _last_open) < COOLDOWN:
-        venting = int(COOLDOWN - (now - _last_open)) + 1
-        return False, "Vent %d s (sperre mot dobbelttrykk)" % venting
+    if CFG["cooldown"] and (now - _last_open) < CFG["cooldown"]:
+        return False, "Vent %d s (sperre mot dobbelttrykk)" % (
+            int(CFG["cooldown"] - (now - _last_open)) + 1)
 
     try:
         finnes, before = _get_state()
     except Exception as e:
         return False, "Naadde ikke HA: %s" % e
     if not finnes:
-        return False, "Entiteten '%s' finnes ikke i HA" % ENTITY
+        return False, "Entiteten '%s' finnes ikke i HA" % CFG["entity_id"]
 
-    body = json.dumps({"entity_id": ENTITY}).encode()
     req = urllib.request.Request(
         HA_URL + "/services/button/press",
-        data=body,
+        data=json.dumps({"entity_id": CFG["entity_id"]}).encode(),
         method="POST",
-        headers={
-            "Authorization": "Bearer " + SUPERVISOR_TOKEN,
-            "Content-Type": "application/json",
-        },
+        headers={"Authorization": "Bearer " + SUPERVISOR_TOKEN,
+                 "Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
@@ -94,16 +183,14 @@ def press():
         after = None
     if after and after != before:
         return True, "Signal sendt - bekreftet av HA"
-    # Kallet gikk gjennom, men vi kunne ikke bekrefte at knappen ble trykket.
     return True, "Signal sendt (ikke bekreftet av HA)"
 
 
+# ----------------------------------------------------------------- html ----
 PAGE = """<!doctype html>
 <html lang="no"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex,nofollow">
-<title>Garasjeport</title>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>Garasjeport</title>
 <style>
 :root{--bg:#f4f4f5;--card:#fff;--fg:#18181b;--dim:#71717a;--line:#e4e4e7;
       --accent:#0f766e;--accent2:#115e59;--err:#b91c1c;--ok:#15803d}
@@ -117,12 +204,12 @@ body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
 .card{background:var(--card);border:1px solid var(--line);border-radius:18px;
       padding:32px 28px;width:100%;max-width:380px;text-align:center;
       box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.card.wide{max-width:640px;text-align:left}
 h1{margin:0 0 4px;font-size:20px;letter-spacing:-.01em}
 p.sub{margin:0 0 26px;color:var(--dim);font-size:14px}
 button.big{width:180px;height:180px;border-radius:50%;border:none;cursor:pointer;
       background:var(--accent);color:#fff;font-size:17px;font-weight:600;
-      letter-spacing:.01em;transition:transform .08s,background .15s;
-      -webkit-tap-highlight-color:transparent}
+      transition:transform .08s,background .15s;-webkit-tap-highlight-color:transparent}
 button.big:hover{background:var(--accent2)}
 button.big:active{transform:scale(.96)}
 button.big:disabled{opacity:.55;cursor:not-allowed}
@@ -136,7 +223,20 @@ button.go{width:100%;padding:12px;font-size:16px;font-weight:600;border:none;
 .ok{color:var(--ok)}.err{color:var(--err)}
 footer{margin-top:22px;font-size:12px;color:var(--dim)}
 a{color:var(--dim)}
-</style></head><body><div class="card">__BODY__</div>
+table{width:100%;border-collapse:collapse;font-size:13px;
+      font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);
+      white-space:nowrap}
+th{color:var(--dim);font-weight:600;font-size:11px;text-transform:uppercase;
+   letter-spacing:.04em}
+td.d{white-space:normal;color:var(--dim)}
+.wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.tag{display:inline-block;padding:1px 7px;border-radius:5px;font-size:11px;
+     font-weight:600}
+.t-open{background:rgba(21,128,61,.14);color:var(--ok)}
+.t-fail{background:rgba(185,28,28,.14);color:var(--err)}
+.t-in{background:rgba(113,113,122,.16);color:var(--dim)}
+</style></head><body><div class="card __WIDE__">__BODY__</div>
 <script>
 var b=document.getElementById('open');
 if(b){b.addEventListener('click',function(){
@@ -144,34 +244,64 @@ if(b){b.addEventListener('click',function(){
   b.disabled=true;m.className='';m.textContent='Sender...';
   fetch('open',{method:'POST'}).then(function(r){return r.json()})
   .then(function(d){m.className=d.ok?'ok':'err';m.textContent=(d.ok?'\\u2713 ':'\\u2717 ')+d.msg})
-  .catch(function(e){m.className='err';m.textContent='\\u2717 Nettverksfeil'})
+  .catch(function(){m.className='err';m.textContent='\\u2717 Nettverksfeil'})
   .then(function(){setTimeout(function(){b.disabled=false},2000)})
 })}
 </script></body></html>"""
 
-LOGIN = """<h1>Garasjeport</h1>
-<p class="sub">Skriv inn brukernavn</p>
+LOGIN = """<h1>Garasjeport</h1><p class="sub">Skriv inn brukernavn</p>
 <form method="POST" action="login">
 <input name="u" autocomplete="off" autocapitalize="off" autocorrect="off"
        spellcheck="false" placeholder="brukernavn" autofocus>
-<button class="go" type="submit">Fortsett</button>
-</form>__ERR__"""
+<button class="go" type="submit">Fortsett</button></form>__ERR__"""
 
 BUTTON = """<h1>Garasjeport</h1>
-<p class="sub">1A &middot; trykk for a apne</p>
+<p class="sub">1A &middot; innlogget som <strong>__WHO__</strong></p>
 <button class="big" id="open"><span class="icon">&#9650;</span>APNE</button>
 <div id="msg"></div>
-<footer>Porten lukker seg selv &middot; <a href="logout">logg ut</a></footer>"""
+<footer>Porten lukker seg selv &middot; <a href="logg">logg</a>
+ &middot; <a href="logout">logg ut</a></footer>"""
 
 
+def logg_html(rows, who):
+    tags = {"open_ok": ("t-open", "APNET"), "open_fail": ("t-fail", "FEIL"),
+            "login_ok": ("t-in", "LOGG INN"), "login_fail": ("t-fail", "AVVIST"),
+            "logout": ("t-in", "LOGG UT")}
+    body = ['<h1>Adgangslogg</h1><p class="sub">Nyeste først &middot; innlogget som '
+            '<strong>%s</strong></p><div class="wrap"><table>'
+            '<tr><th>Tid</th><th>Hendelse</th><th>Bruker</th><th>IP</th>'
+            '<th>Detalj</th></tr>' % esc(who)]
+    if not rows:
+        body.append('<tr><td colspan="5" class="d">Ingen oppføringer ennå</td></tr>')
+    for r in rows:
+        cls, txt = tags.get(r.get("event"), ("t-in", r.get("event", "?")))
+        body.append("<tr><td>%s</td><td><span class='tag %s'>%s</span></td>"
+                    "<td>%s</td><td>%s</td><td class='d'>%s</td></tr>"
+                    % (esc(r.get("t", "")), cls, txt, esc(r.get("user", "-")),
+                       esc(r.get("ip", "")), esc(r.get("detail", ""))))
+    body.append('</table></div><footer><a href="./">&larr; tilbake</a></footer>')
+    return "".join(body)
+
+
+def esc(s):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+# ---------------------------------------------------------------- server ----
 class H(http.server.BaseHTTPRequestHandler):
-    server_version = "gp/1.0"
+    server_version = "gp/2.0"
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, fmt, *a):  # kortere logg til add-on-loggen
-        print("%s - %s" % (self.address_string(), fmt % a), flush=True)
+    def log_message(self, fmt, *a):
+        pass  # vi logger selv, mer lesbart
 
-    # -- hjelpere -------------------------------------------------------
+    def client_ip(self):
+        fwd = self.headers.get("X-Forwarded-For", "")
+        if fwd:
+            return fwd.split(",")[0].strip() + " (via proxy)"
+        return self.client_address[0]
+
     def _send(self, code, body, ctype="text/html; charset=utf-8", extra=None):
         raw = body.encode() if isinstance(body, str) else body
         self.send_response(code)
@@ -185,79 +315,95 @@ class H(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def _page(self, inner, extra=None, code=200):
-        self._send(code, PAGE.replace("__BODY__", inner), extra=extra)
+    def _page(self, inner, extra=None, code=200, wide=False):
+        html = PAGE.replace("__BODY__", inner).replace("__WIDE__", "wide" if wide else "")
+        self._send(code, html, extra=extra)
 
-    def _authed(self):
-        raw = self.headers.get("Cookie", "")
-        for part in raw.split(";"):
+    def _user(self):
+        for part in self.headers.get("Cookie", "").split(";"):
             if "=" in part:
                 k, v = part.strip().split("=", 1)
                 if k == COOKIE:
-                    return valid(urllib.parse.unquote(v))
-        return False
+                    return whoami(urllib.parse.unquote(v))
+        return None
 
-    def _setcookie(self, value, maxage=31536000):
-        return [("Set-Cookie",
-                 "%s=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d"
-                 % (COOKIE, urllib.parse.quote(value), maxage))]
+    def _cookie(self, value):
+        return [("Set-Cookie", "%s=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000"
+                 % (COOKIE, urllib.parse.quote(value)))]
 
-    def _path(self):
-        return urllib.parse.urlparse(self.path)
+    def _login_ok(self, user, extra_cookie=True):
+        logg("login_ok", user["label"], self.client_ip())
+        self._page(BUTTON.replace("__WHO__", esc(user["label"])),
+                   extra=self._cookie(user["username"]) if extra_cookie else None)
 
-    # -- ruter ----------------------------------------------------------
+    def _login_fail(self, attempted):
+        time.sleep(1)  # bremser gjetting
+        logg("login_fail", None, self.client_ip(),
+             "forsøkte: %s" % (attempted[:40] or "(tom)"))
+        self._page(LOGIN.replace(
+            "__ERR__", '<div id="msg" class="err">Ukjent brukernavn</div>'), code=401)
+
     def do_GET(self):
-        p = self._path()
+        p = urllib.parse.urlparse(self.path)
         route = p.path.rstrip("/") or "/"
+        if route == "/health":
+            self._send(200, json.dumps({"ok": True, "users": len(CFG["users"])}),
+                       "application/json")
+            return
         if route == "/logout":
+            u = self._user()
+            if u:
+                logg("logout", u["label"], self.client_ip())
             self._page(LOGIN.replace("__ERR__", ""),
                        extra=[("Set-Cookie", "%s=; Path=/; Max-Age=0" % COOKIE)])
             return
-        if route == "/health":
-            self._send(200, json.dumps({"ok": True}), "application/json")
+        if route == "/logg":
+            u = self._user()
+            if not u:
+                self._page(LOGIN.replace("__ERR__", ""), code=401)
+                return
+            self._page(logg_html(les_logg(150), u["label"]), wide=True)
             return
         if route != "/":
-            self._send(404, "<h1>404</h1>", "text/html; charset=utf-8")
+            self._send(404, "<h1>404</h1>")
             return
-        # ?u=<brukernavn> gir ett-klikks bokmerke
         q = urllib.parse.parse_qs(p.query).get("u", [""])[0]
         if q:
-            if valid(q):
-                self._page(BUTTON, extra=self._setcookie(q))
+            u = whoami(q)
+            if u:
+                self._login_ok(u)
             else:
-                time.sleep(1)
-                self._page(LOGIN.replace(
-                    "__ERR__", '<div id="msg" class="err">Ukjent brukernavn</div>'),
-                    code=401)
+                self._login_fail(q)
             return
-        if self._authed():
-            self._page(BUTTON)
+        u = self._user()
+        if u:
+            self._page(BUTTON.replace("__WHO__", esc(u["label"])))
         else:
             self._page(LOGIN.replace("__ERR__", ""))
 
     def do_POST(self):
-        route = self._path().path.rstrip("/") or "/"
+        route = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
         n = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
         if route == "/login":
-            name = urllib.parse.parse_qs(raw).get("u", [""])[0]
-            if valid(name):
-                self._page(BUTTON, extra=self._setcookie(name))
+            given = urllib.parse.parse_qs(raw).get("u", [""])[0]
+            u = whoami(given)
+            if u:
+                self._login_ok(u)
             else:
-                time.sleep(1)  # bremser gjetting
-                self._page(LOGIN.replace(
-                    "__ERR__", '<div id="msg" class="err">Ukjent brukernavn</div>'),
-                    code=401)
+                self._login_fail(given)
             return
         if route == "/open":
-            if not self._authed():
+            u = self._user()
+            if not u:
+                logg("open_fail", None, self.client_ip(), "ikke innlogget")
                 self._send(401, json.dumps({"ok": False, "msg": "Ikke innlogget"}),
                            "application/json")
                 return
             ok, msg = press()
-            print("APNE fra %s -> %s (%s)" % (self.address_string(), ok, msg), flush=True)
-            self._send(200 if ok else 503,
-                       json.dumps({"ok": ok, "msg": msg}), "application/json")
+            logg("open_ok" if ok else "open_fail", u["label"], self.client_ip(), msg)
+            self._send(200 if ok else 503, json.dumps({"ok": ok, "msg": msg}),
+                       "application/json")
             return
         self._send(404, json.dumps({"ok": False, "msg": "ukjent"}), "application/json")
 
@@ -268,7 +414,10 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 if __name__ == "__main__":
-    if not USERNAME or USERNAME.startswith("BYTT-MEG"):
-        print("ADVARSEL: brukernavn er ikke satt/endret - alle blir avvist", flush=True)
-    print("Lytter på :8099, entity=%s, cooldown=%ds" % (ENTITY, COOLDOWN), flush=True)
+    if not CFG["users"]:
+        print("ADVARSEL: ingen brukere konfigurert - alle blir avvist", flush=True)
+    else:
+        print("Brukere: %s" % ", ".join(u["label"] for u in CFG["users"]), flush=True)
+    print("Lytter på :8099, entity=%s, cooldown=%ds, logg=%s"
+          % (CFG["entity_id"], CFG["cooldown"], LOG_FILE), flush=True)
     Server(("0.0.0.0", 8099), H).serve_forever()
