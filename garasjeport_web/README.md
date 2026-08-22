@@ -66,3 +66,29 @@ Formuler aldri meldinger som antyder noe annet.
 | `GET /logg` | Adgangsloggen. Krever innlogging. |
 | `GET /health` | Helsesjekk + antall aktive brukere |
 | `GET /logout` | Glem cookie |
+
+## Sperre mot gjetting (brute force)
+
+| Opsjon | Standard | Beskrivelse |
+|---|---|---|
+| `max_failures` | 20 | Antall feilede innlogginger som utløser blokkering |
+| `window_hours` | 12 | Rullende vindu feilene telles innenfor |
+| `block_hours` | 0 | 0 = blokkeringen varer til den fjernes manuelt |
+| `trust_proxy` | false | Bruk `X-Forwarded-For` som nøkkel. Kun hvis du faktisk har en proxy foran – ellers deler alle nøkkel |
+| `never_block` | `[]` | Ekstra IP-er/CIDR som aldri blokkeres |
+
+**Private IP-er blokkeres aldri.** Det er en bevisst sikring så du ikke kan låse
+deg selv ute hjemmefra. Merk at Pythons `is_private` også dekker
+dokumentasjonsområdene (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) – bruk
+ekte offentlige adresser hvis du skal teste sperren.
+
+En blokkert IP får 403 på alt unntatt `/health`, også med riktig brukernavn.
+
+### Oppheve blokkeringer
+
+Brukere med `admin: true` får siden `/blokkeringer`: oversikt over IP-er med
+feilforsøk, hvilke som er blokkert, og knapper for å oppheve enkeltvis eller
+alle. Opphevinger logges med hvem som gjorde det.
+
+Har du ingen admin-bruker, kan blokkeringer også fjernes ved å slette
+`/data/blocks.json` i add-onet og restarte.

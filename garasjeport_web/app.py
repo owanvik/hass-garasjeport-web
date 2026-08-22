@@ -9,6 +9,7 @@ Konfigurasjon leses fra /data/options.json (add-on-standard). Miljovariabler
 med GP_-prefiks overstyrer, slik at appen kan kjores og testes utenfor HA.
 """
 import http.server
+import ipaddress
 import json
 import os
 import secrets
@@ -21,12 +22,14 @@ import urllib.request
 
 OPTIONS_FILE = os.environ.get("GP_OPTIONS", "/data/options.json")
 LOG_FILE = os.environ.get("GP_LOG", "/data/access.log")
+BLOCKS_FILE = os.environ.get("GP_BLOCKS", "/data/blocks.json")
 HA_URL = os.environ.get("GP_HA_URL", "http://supervisor/core/api")
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 COOKIE = "gp_user"
 
 _lock = threading.Lock()
 _last_open = 0.0
+_sist_varsel = {}   # ip -> monotonic, demper logging av blokkerte forsok
 
 
 # --------------------------------------------------------------- config ----
@@ -55,7 +58,8 @@ def load_options():
         if not name or not u.get("enabled", True):
             continue
         clean.append({"username": name,
-                      "label": str(u.get("label") or name).strip()})
+                      "label": str(u.get("label") or name).strip(),
+                      "admin": bool(u.get("admin", False))})
 
     return {
         "users": clean,
@@ -63,10 +67,121 @@ def load_options():
                      or opts.get("entity_id", "button.garasjeport_garasjeport_apne"),
         "cooldown": int(os.environ.get("GP_COOLDOWN") or opts.get("cooldown_seconds", 5)),
         "log_max": int(os.environ.get("GP_LOG_MAX") or opts.get("log_max_lines", 5000)),
+        "max_failures": int(os.environ.get("GP_MAX_FAIL")
+                            or opts.get("max_failures", 20)),
+        "window_hours": int(os.environ.get("GP_WINDOW_H")
+                            or opts.get("window_hours", 12)),
+        # 0 = blokkeringen varer til den fjernes manuelt
+        "block_hours": int(os.environ.get("GP_BLOCK_H")
+                           or opts.get("block_hours", 0)),
+        "trust_proxy": bool(opts.get("trust_proxy", False)),
+        "never_block": list(opts.get("never_block") or []),
     }
 
 
 CFG = load_options()
+
+
+def _load_blocks():
+    try:
+        with open(BLOCKS_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_blocks(d):
+    try:
+        with open(BLOCKS_FILE, "w") as f:
+            json.dump(d, f)
+    except Exception as e:
+        print("Kunne ikke lagre blokkeringer: %s" % e, flush=True)
+
+
+BLOCKS = _load_blocks()
+
+
+def fredet(ip):
+    """IP-er som aldri blokkeres. Private adresser er alltid fredet, sa man
+    ikke kan lase seg selv ute hjemmefra."""
+    try:
+        a = ipaddress.ip_address(ip)
+        if a.is_private or a.is_loopback:
+            return True
+    except ValueError:
+        return False
+    for e in CFG["never_block"]:
+        try:
+            if a in ipaddress.ip_network(str(e), strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def er_blokkert(ip):
+    with _lock:
+        b = BLOCKS.get(ip)
+        if not b or not b.get("blocked_at"):
+            return False
+        if CFG["block_hours"]:
+            if time.time() - b["blocked_at"] > CFG["block_hours"] * 3600:
+                b["blocked_at"] = None
+                b["fails"] = []
+                _save_blocks(BLOCKS)
+                return False
+        return True
+
+
+def registrer_feil(ip):
+    """Tell et feilforsok. Returnerer True hvis dette utloste blokkering."""
+    if fredet(ip):
+        return False
+    now = time.time()
+    cutoff = now - CFG["window_hours"] * 3600
+    with _lock:
+        b = BLOCKS.setdefault(ip, {"fails": [], "blocked_at": None})
+        b["fails"] = [t for t in b["fails"] if t > cutoff] + [now]
+        if b["blocked_at"]:
+            _save_blocks(BLOCKS)
+            return False
+        if len(b["fails"]) >= CFG["max_failures"]:
+            b["blocked_at"] = now
+            _save_blocks(BLOCKS)
+            return True
+        _save_blocks(BLOCKS)
+        return False
+
+
+def antall_feil(ip):
+    cutoff = time.time() - CFG["window_hours"] * 3600
+    with _lock:
+        b = BLOCKS.get(ip) or {}
+        return len([t for t in b.get("fails", []) if t > cutoff])
+
+
+def opphev(ip=None):
+    """Fjern blokkering for en IP, eller alle hvis ip er None."""
+    with _lock:
+        if ip is None:
+            n = sum(1 for v in BLOCKS.values() if v.get("blocked_at"))
+            BLOCKS.clear()
+        else:
+            n = 1 if BLOCKS.pop(ip, None) else 0
+        _save_blocks(BLOCKS)
+    return n
+
+
+def blokkeringer():
+    out = []
+    cutoff = time.time() - CFG["window_hours"] * 3600
+    with _lock:
+        for ip, b in BLOCKS.items():
+            ferske = len([t for t in b.get("fails", []) if t > cutoff])
+            out.append({"ip": ip, "fails": ferske, "total": len(b.get("fails", [])),
+                        "blocked_at": b.get("blocked_at")})
+    out.sort(key=lambda x: (x["blocked_at"] or 0, x["fails"]), reverse=True)
+    return out
 
 
 def whoami(given):
@@ -268,14 +383,16 @@ BUTTON = """<h1>Garasjeport</h1>
 <p class="sub">1A &middot; innlogget som <strong>__WHO__</strong></p>
 <button class="big" id="open"><span class="icon">&#9650;</span>APNE</button>
 <div id="msg"></div>
-<footer>Porten melder ikke tilbake &middot; lukker seg selv<br><a href="logg">logg</a>
+<footer>Porten melder ikke tilbake &middot; lukker seg selv<br><a href="logg">logg</a>__ADMIN__
  &middot; <a href="logout">logg ut</a></footer>"""
 
 
 def logg_html(rows, who):
     tags = {"open_ok": ("t-open", "APNET"), "open_fail": ("t-fail", "FEIL"),
             "login_ok": ("t-in", "LOGG INN"), "login_fail": ("t-fail", "AVVIST"),
-            "logout": ("t-in", "LOGG UT")}
+            "logout": ("t-in", "LOGG UT"), "blocked": ("t-fail", "BLOKKERT"),
+            "blocked_try": ("t-fail", "STENGT UTE"),
+            "unblock": ("t-open", "OPPHEVET")}
     body = ['<h1>Adgangslogg</h1><p class="sub">Nyeste først &middot; innlogget som '
             '<strong>%s</strong></p><div class="wrap"><table>'
             '<tr><th>Tid</th><th>Hendelse</th><th>Bruker</th><th>IP</th>'
@@ -292,6 +409,39 @@ def logg_html(rows, who):
     return "".join(body)
 
 
+def blocks_html(rader, who):
+    aktive = [r for r in rader if r["blocked_at"]]
+    b = ['<h1>Blokkeringer</h1><p class="sub">%d aktiv(e) &middot; grense: %d feil '
+         'per %d timer &middot; innlogget som <strong>%s</strong></p>'
+         % (len(aktive), CFG["max_failures"], CFG["window_hours"], esc(who))]
+    b.append('<div class="wrap"><table><tr><th>IP</th><th>Status</th>'
+             '<th>Feil i vindu</th><th>Blokkert siden</th><th></th></tr>')
+    if not rader:
+        b.append('<tr><td colspan="5" class="d">Ingen feilforsøk registrert</td></tr>')
+    for r in rader:
+        if r["blocked_at"]:
+            status = "<span class='tag t-fail'>BLOKKERT</span>"
+            siden = time.strftime("%Y-%m-%d %H:%M",
+                                  time.localtime(r["blocked_at"]))
+            knapp = ("<form method='POST' action='unblock' style='margin:0'>"
+                     "<input type='hidden' name='ip' value='%s'>"
+                     "<button class='go' style='padding:5px 10px;font-size:13px;"
+                     "width:auto'>Opphev</button></form>" % esc(r["ip"]))
+        else:
+            status = "<span class='tag t-in'>følges</span>"
+            siden, knapp = "&ndash;", ""
+        b.append("<tr><td>%s</td><td>%s</td><td>%d</td><td>%s</td><td>%s</td></tr>"
+                 % (esc(r["ip"]), status, r["fails"], siden, knapp))
+    b.append("</table></div>")
+    if aktive:
+        b.append("<form method='POST' action='unblock' style='margin-top:16px'>"
+                 "<input type='hidden' name='alle' value='1'>"
+                 "<button class='go'>Opphev alle (%d)</button></form>" % len(aktive))
+    b.append('<footer>Private IP-er blokkeres aldri &middot; '
+             '<a href="./">&larr; tilbake</a></footer>')
+    return "".join(b)
+
+
 def esc(s):
     return (str(s).replace("&", "&amp;").replace("<", "&lt;")
             .replace(">", "&gt;").replace('"', "&quot;"))
@@ -306,9 +456,13 @@ class H(http.server.BaseHTTPRequestHandler):
         pass  # vi logger selv, mer lesbart
 
     def client_ip(self):
-        fwd = self.headers.get("X-Forwarded-For", "")
-        if fwd:
-            return fwd.split(",")[0].strip() + " (via proxy)"
+        """Ren IP - brukes som nokkel for blokkering, sa den ma ikke pyntes.
+        X-Forwarded-For brukes kun hvis trust_proxy er satt; ellers ville
+        alle bak en proxy delt samme nokkel og blitt blokkert sammen."""
+        if CFG["trust_proxy"]:
+            fwd = self.headers.get("X-Forwarded-For", "")
+            if fwd:
+                return fwd.split(",")[0].strip()
         return self.client_address[0]
 
     def _send(self, code, body, ctype="text/html; charset=utf-8", extra=None):
@@ -328,6 +482,10 @@ class H(http.server.BaseHTTPRequestHandler):
         html = PAGE.replace("__BODY__", inner).replace("__WIDE__", "wide" if wide else "")
         self._send(code, html, extra=extra)
 
+    def _btn(self, u):
+        adm = ' &middot; <a href="blokkeringer">blokkeringer</a>' if u["admin"] else ''
+        return BUTTON.replace("__WHO__", esc(u["label"])).replace("__ADMIN__", adm)
+
     def _user(self):
         for part in self.headers.get("Cookie", "").split(";"):
             if "=" in part:
@@ -342,19 +500,51 @@ class H(http.server.BaseHTTPRequestHandler):
 
     def _login_ok(self, user, extra_cookie=True):
         logg("login_ok", user["label"], self.client_ip())
-        self._page(BUTTON.replace("__WHO__", esc(user["label"])),
+        self._page(self._btn(user),
                    extra=self._cookie(user["username"]) if extra_cookie else None)
 
     def _login_fail(self, attempted):
         time.sleep(1)  # bremser gjetting
-        logg("login_fail", None, self.client_ip(),
-             "forsøkte: %s" % (attempted[:40] or "(tom)"))
+        ip = self.client_ip()
+        ble_blokkert = registrer_feil(ip)
+        n = antall_feil(ip)
+        teller = "fredet" if fredet(ip) else "%d/%d" % (n, CFG["max_failures"])
+        logg("login_fail", None, ip, "forsøkte: %s (%s)"
+             % (attempted[:40] or "(tom)", teller))
+        if ble_blokkert:
+            logg("blocked", None, ip, "%d feil innen %d timer"
+                 % (n, CFG["window_hours"]))
+            self._blokkert_side()
+            return
         self._page(LOGIN.replace(
             "__ERR__", '<div id="msg" class="err">Ukjent brukernavn</div>'), code=401)
+
+    def _blokkert_side(self):
+        self._page(
+            '<h1>Blokkert</h1><p class="sub">For mange feilede innlogginger '
+            'fra denne adressen.</p><div id="msg" class="err">Kontakt eier '
+            'for å få blokkeringen fjernet.</div>', code=403)
+
+    def _stengt(self, route):
+        """True hvis forespoerselen skal avvises fordi IP-en er blokkert."""
+        if route == "/health":
+            return False
+        ip = self.client_ip()
+        if not er_blokkert(ip):
+            return False
+        global _sist_varsel
+        now = time.monotonic()
+        if now - _sist_varsel.get(ip, 0) > 60:   # ikke oversvom loggen
+            _sist_varsel[ip] = now
+            logg("blocked_try", None, ip, "avvist (blokkert)")
+        return True
 
     def do_GET(self):
         p = urllib.parse.urlparse(self.path)
         route = p.path.rstrip("/") or "/"
+        if self._stengt(route):
+            self._blokkert_side()
+            return
         if route == "/health":
             try:
                 whoami("helsesjekk-treffer-ingen")   # tren kodestien
@@ -380,6 +570,19 @@ class H(http.server.BaseHTTPRequestHandler):
                 return
             self._page(logg_html(les_logg(150), u["label"]), wide=True)
             return
+        if route == "/blokkeringer":
+            u = self._user()
+            if not u:
+                self._page(LOGIN.replace("__ERR__", ""), code=401)
+                return
+            if not u["admin"]:
+                self._page('<h1>Ingen tilgang</h1><p class="sub">Krever en bruker '
+                           'med <code>admin: true</code>.</p>'
+                           '<footer><a href="./">&larr; tilbake</a></footer>',
+                           code=403)
+                return
+            self._page(blocks_html(blokkeringer(), u["label"]), wide=True)
+            return
         if route != "/":
             self._send(404, "<h1>404</h1>")
             return
@@ -393,12 +596,15 @@ class H(http.server.BaseHTTPRequestHandler):
             return
         u = self._user()
         if u:
-            self._page(BUTTON.replace("__WHO__", esc(u["label"])))
+            self._page(self._btn(u))
         else:
             self._page(LOGIN.replace("__ERR__", ""))
 
     def do_POST(self):
         route = urllib.parse.urlparse(self.path).path.rstrip("/") or "/"
+        if self._stengt(route):
+            self._blokkert_side()
+            return
         n = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
         if route == "/login":
@@ -408,6 +614,22 @@ class H(http.server.BaseHTTPRequestHandler):
                 self._login_ok(u)
             else:
                 self._login_fail(given)
+            return
+        if route == "/unblock":
+            u = self._user()
+            if not u or not u["admin"]:
+                self._send(403, json.dumps({"ok": False, "msg": "Krever admin"}),
+                           "application/json")
+                return
+            felt = urllib.parse.parse_qs(raw)
+            mal = felt.get("ip", [""])[0]
+            if felt.get("alle"):
+                n = opphev(None)
+                logg("unblock", u["label"], self.client_ip(), "opphevet alle (%d)" % n)
+            else:
+                n = opphev(mal)
+                logg("unblock", u["label"], self.client_ip(), "opphevet %s" % mal)
+            self._send(303, "", extra=[("Location", "blokkeringer")])
             return
         if route == "/open":
             u = self._user()
