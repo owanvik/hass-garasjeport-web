@@ -418,10 +418,14 @@ STATIC = {
 MANIFEST = json.dumps({
     "name": "Garasjeport", "short_name": "Garasjeport",
     "start_url": "./", "scope": "./", "display": "standalone",
-    "background_color": "#0f766e", "theme_color": "#0f766e",
-    "icons": [{"src": "icon-192.png", "sizes": "192x192", "type": "image/png"},
+    # Splash-fargen matcher ikonets bakgrunn; theme_color folger UI-aksenten.
+    "background_color": "#0da9a4", "theme_color": "#0f766e",
+    # "any" og ikke "maskable": ikonet er fullflate, sa Android ville
+    # beskaret takhjornene bort i den maskerte varianten.
+    "icons": [{"src": "icon-192.png", "sizes": "192x192", "type": "image/png",
+               "purpose": "any"},
               {"src": "icon-512.png", "sizes": "512x512", "type": "image/png",
-               "purpose": "any maskable"}],
+               "purpose": "any"}],
 }, ensure_ascii=False)
 
 PAGE = """<!doctype html>
